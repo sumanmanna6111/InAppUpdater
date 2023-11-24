@@ -1,11 +1,13 @@
-package com.suman.inappupdate
+package com.suman.appupdater
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -13,25 +15,33 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import androidx.annotation.RequiresApi
+import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import java.io.File
-import java.util.Timer
-import kotlin.concurrent.schedule
 
 
-class DownloadController(private val context: Context, private val url: String) {
-    companion object {
-        private const val FILE_NAME = "DownloadApp.apk"
-        private const val FILE_BASE_PATH = "file://"
-        private const val MIME_TYPE = "application/vnd.android.package-archive"
-        private const val PROVIDER_PATH = ".provider"
-        private const val APP_INSTALL_PATH = "\"application/vnd.android.package-archive\""
-    }
+class DownloadController(private val context: Context) {
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun enqueueDownload(url: String, progressListener: ProgressListener) {
+        if (Build.VERSION_CODES.TIRAMISU > Build.VERSION.SDK_INT)
+            if (ActivityCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                Toast.makeText(context, "Need Storage Permission", Toast.LENGTH_SHORT).show()
+                ActivityCompat.requestPermissions(
+                    context as Activity,
+                    arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                    0
+                )
+                return
+            }
 
-    @SuppressLint("Range")
-    fun enqueueDownload() {
-        val destination = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS).toString() + "/$FILE_NAME"
-        val uri = Uri.parse("$FILE_BASE_PATH$destination")
+        val destination = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            .toString() + "/DownloadApp.apk"
+        val uri = Uri.parse("file://$destination")
         val file = File(destination)
         if (file.exists()) file.delete()
         val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
@@ -39,7 +49,7 @@ class DownloadController(private val context: Context, private val url: String) 
         val request = DownloadManager.Request(downloadUri)
         //request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_HIDDEN)
         request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
-        request.setMimeType(MIME_TYPE)
+        request.setMimeType("application/vnd.android.package-archive")
         request.setTitle("Updating ...")
         request.setDescription("Description")
         request.setRequiresCharging(false)// Set if charging is required to begin the download
@@ -47,30 +57,39 @@ class DownloadController(private val context: Context, private val url: String) 
         request.setAllowedOverRoaming(true);
         request.setDestinationUri(uri)
         showInstallOption(destination, uri)
-
         val downloadId = downloadManager.enqueue(request)
-        Toast.makeText(context, "Downloading...", Toast.LENGTH_LONG).show()
+        progressListener.onStarted()
 
         val mainHandler = Handler(Looper.getMainLooper())
         mainHandler.post(object : Runnable {
+            @SuppressLint("Range")
             override fun run() {
-                val cursor = downloadManager.query(DownloadManager.Query().setFilterById(downloadId))
+                val cursor =
+                    downloadManager.query(DownloadManager.Query().setFilterById(downloadId))
                 if (cursor.moveToFirst()) {
                     val status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS))
                     when (status) {
-                        DownloadManager.STATUS_FAILED -> {}
+                        DownloadManager.STATUS_FAILED -> {
+                            progressListener.onProgress(0)
+                            mainHandler.removeCallbacks(this)
+                        }
+
                         DownloadManager.STATUS_PAUSED -> {}
                         DownloadManager.STATUS_PENDING -> {}
                         DownloadManager.STATUS_RUNNING -> {
-                            val total = cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                            val total =
+                                cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
                             if (total >= 0) {
-                                val downloaded = cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                                val downloaded =
+                                    cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
                                 val progress = (downloaded * 100L / total).toInt()
-                                Log.d("TAG", "enqueueDownload: $progress")
+                                progressListener.onProgress(progress)
                             }
                         }
+
                         DownloadManager.STATUS_SUCCESSFUL -> {
-                            Log.d("TAG", "enqueueDownload: 100")
+                            progressListener.onProgress(100)
+                            progressListener.onFinished()
                             mainHandler.removeCallbacks(this)
                             return
                         }
@@ -81,14 +100,18 @@ class DownloadController(private val context: Context, private val url: String) 
             }
         })
 
-
-
     }
+
+
     private fun showInstallOption(destination: String, uri: Uri) {
         val onComplete = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    val contentUri = FileProvider.getUriForFile(context,context.packageName+ PROVIDER_PATH, File(destination))
+                    val contentUri = FileProvider.getUriForFile(
+                        context,
+                        context.packageName + ".provider",
+                        File(destination)
+                    )
                     val install = Intent(Intent.ACTION_VIEW)
                     install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     install.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -99,7 +122,7 @@ class DownloadController(private val context: Context, private val url: String) 
                 } else {
                     val install = Intent(Intent.ACTION_VIEW)
                     install.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    install.setDataAndType(uri, APP_INSTALL_PATH)
+                    install.setDataAndType(uri, "application/vnd.android.package-archive")
                     context.startActivity(install)
                     context.unregisterReceiver(this)
                 }
